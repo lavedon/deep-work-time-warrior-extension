@@ -104,8 +104,7 @@ public static class Cli
         var parser = new TimewarriorExportParser(CategoryMapper.CreateDefault());
         return parser.Parse(
             json,
-            options.DeepTags,
-            options.AllTrackedIsDeep,
+            options.NonDeepTags,
             DateTimeOffset.Now,
             TimeAnalyzer.AtLocalStart(fromInclusive),
             TimeAnalyzer.AtLocalStart(toExclusive));
@@ -121,7 +120,7 @@ public static class Cli
     {
         var analyzer = new TimeAnalyzer();
         var deepByCategory = analyzer.GetDailyTotalsByCategory(intervals, analysisFrom, to, deepOnly: true);
-        var totalDeep = analyzer.SumCategoryTotals(deepByCategory, analysisFrom, to);
+        var totalDeep = analyzer.GetDailyTotals(intervals, analysisFrom, to, interval => interval.IsDeepWork);
 
         AnsiConsole.Write(new Rule("[bold blue]Deep Work / Timewarrior Analytics[/]").RuleStyle("blue"));
         AnsiConsole.WriteLine();
@@ -131,17 +130,15 @@ public static class Cli
             : options.ExportFile;
         AnsiConsole.MarkupLine($"[grey]Source:[/] {Markup.Escape(source)}");
         AnsiConsole.MarkupLine($"[grey]Analysis range:[/] {analysisFrom:yyyy-MM-dd} → {to:yyyy-MM-dd}");
-        AnsiConsole.MarkupLine(options.AllTrackedIsDeep
-            ? "[grey]Deep work rule:[/] every tracked interval counts as deep work"
-            : $"[grey]Deep work tags:[/] {Markup.Escape(string.Join(", ", options.DeepTags.Order()))}");
+        AnsiConsole.MarkupLine($"[grey]Deep work rule:[/] tracked intervals count as deep unless tagged non-deep ({Markup.Escape(FormatTagList(options.NonDeepTags))})");
 
         if (intervals.Count == 0)
         {
             AnsiConsole.MarkupLine("[yellow]No intervals found for this range.[/]");
         }
-        else if (!options.AllTrackedIsDeep && !intervals.Any(interval => interval.IsDeepWork))
+        else if (!intervals.Any(interval => interval.IsDeepWork))
         {
-            AnsiConsole.MarkupLine("[yellow]No deep-tagged intervals found. Add a deep/focus tag or use --all-tracked-is-deep.[/]");
+            AnsiConsole.MarkupLine("[yellow]All intervals in this range have non-deep tags.[/]");
         }
 
         var uncategorizedCount = intervals.Count(interval => interval.Category == WorkCategory.Other);
@@ -368,7 +365,7 @@ public static class Cli
 
         AnsiConsole.Write(aliasTable);
         AnsiConsole.WriteLine();
-        AnsiConsole.MarkupLine($"[grey]Deep tags:[/] {Markup.Escape(string.Join(", ", options.DeepTags.Order()))}");
+        AnsiConsole.MarkupLine($"[grey]Non-deep tags:[/] {Markup.Escape(FormatTagList(options.NonDeepTags))}");
         AnsiConsole.MarkupLine("[grey]Tip:[/] tags are normalized, so lc-review, LCReview, and lc_review are equivalent.");
     }
 
@@ -385,8 +382,7 @@ public static class Cli
         AnsiConsole.WriteLine();
         AnsiConsole.MarkupLine("[bold]Examples[/]");
         AnsiConsole.MarkupLine("  [grey]deepwork --job-goal 3h[/]");
-        AnsiConsole.MarkupLine("  [grey]deepwork --deep-tags deep,focus,pomodoro[/]");
-        AnsiConsole.MarkupLine("  [grey]deepwork --all-tracked-is-deep[/]");
+        AnsiConsole.MarkupLine("  [grey]deepwork --non-deep-tags admin,meeting,break,email[/]");
         AnsiConsole.MarkupLine("  [grey]deepwork blocks --days 7 --max-gap 90m[/]");
         AnsiConsole.MarkupLine("  [grey]timew export :month > sample.json && deepwork --file sample.json[/]");
         AnsiConsole.WriteLine();
@@ -396,8 +392,7 @@ public static class Cli
         AnsiConsole.MarkupLine("  [yellow]--to <yyyy-MM-dd>[/]       End date. Default: today.");
         AnsiConsole.MarkupLine("  [yellow]--job-goal <duration>[/]   Daily deep-work goal for Job. Default: 3h.");
         AnsiConsole.MarkupLine("  [yellow]--max-gap <duration>[/]    Same-category block merge gap. Default: 2h.");
-        AnsiConsole.MarkupLine("  [yellow]--deep-tags <csv>[/]       Tags that mark an interval as deep work. Default: deep, deepwork, focus, pomodoro.");
-        AnsiConsole.MarkupLine("  [yellow]--all-tracked-is-deep[/]   Treat every tracked interval as deep work.");
+        AnsiConsole.MarkupLine("  [yellow]--non-deep-tags <csv>[/]   Tags that exclude intervals from deep work. Default: admin, meeting, shallow, break, lunch, email, slack, chat, call.");
         AnsiConsole.MarkupLine("  [yellow]--file <path>[/]           Read Timewarrior export JSON from a file instead of running timew.");
         AnsiConsole.MarkupLine("  [yellow]-h, --help[/]              Show help.");
     }
@@ -468,21 +463,14 @@ public static class Cli
                     options.MaxGap = DurationParser.Parse(RequireValue(), name);
                     break;
 
-                case "--deep-tags":
-                    options.DeepTags.Clear();
+                case "--non-deep-tags":
+                    options.NonDeepTags.Clear();
                     foreach (var tag in RequireValue().Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
                     {
                         var normalized = CategoryMapper.NormalizeTag(tag);
                         if (!string.IsNullOrWhiteSpace(normalized))
-                            options.DeepTags.Add(normalized);
+                            options.NonDeepTags.Add(normalized);
                     }
-
-                    if (options.DeepTags.Count == 0)
-                        throw new ArgumentException("--deep-tags must contain at least one tag.");
-                    break;
-
-                case "--all-tracked-is-deep":
-                    options.AllTrackedIsDeep = ReadOptionalBool(inlineValue);
                     break;
 
                 case "--file":
@@ -565,6 +553,12 @@ public static class Cli
     {
         var style = bold ? $"bold {color}" : color;
         return $"[{style}]{TimeAnalyzer.FormatDuration(duration)}[/]";
+    }
+
+    private static string FormatTagList(IEnumerable<string> tags)
+    {
+        var orderedTags = tags.Order(StringComparer.OrdinalIgnoreCase).ToList();
+        return orderedTags.Count == 0 ? "none" : string.Join(", ", orderedTags);
     }
 
     private static string RatioMarkup(double ratio)

@@ -11,11 +11,10 @@ public sealed class AppOptions
     public DateOnly? To { get; set; }
     public TimeSpan MaxGap { get; set; } = TimeSpan.FromHours(2);
     public TimeSpan JobDailyGoal { get; set; } = TimeSpan.FromHours(3);
-    public bool AllTrackedIsDeep { get; set; }
     public string? ExportFile { get; set; }
     public bool Help { get; set; }
     public bool ListAliases { get; set; }
-    public HashSet<string> DeepTags { get; } = CategoryMapper.NormalizeSet(CategoryMapper.DefaultDeepTags);
+    public HashSet<string> NonDeepTags { get; } = CategoryMapper.NormalizeSet(CategoryMapper.DefaultNonDeepTags);
 
     public DateOnly EffectiveTo(DateOnly today) => To ?? today;
 

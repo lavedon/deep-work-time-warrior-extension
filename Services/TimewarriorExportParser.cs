@@ -15,8 +15,7 @@ public sealed class TimewarriorExportParser
 
     public List<TrackedInterval> Parse(
         string json,
-        ISet<string> normalizedDeepTags,
-        bool allTrackedIsDeep,
+        ISet<string> normalizedNonDeepTags,
         DateTimeOffset now,
         DateTimeOffset? fromInclusive = null,
         DateTimeOffset? toExclusive = null)
@@ -62,7 +61,7 @@ public sealed class TimewarriorExportParser
 
             var tags = ReadTags(element);
             var category = _categoryMapper.MapCategory(tags);
-            var isDeep = allTrackedIsDeep || CategoryMapper.HasAnyNormalizedTag(tags, normalizedDeepTags);
+            var isDeep = !CategoryMapper.HasAnyNormalizedTag(tags, normalizedNonDeepTags);
             var id = ReadId(element, index);
 
             intervals.Add(new TrackedInterval(id, start, end, tags, category, isDeep));

@@ -5,14 +5,20 @@ namespace DeepWork.Services;
 
 public sealed class CategoryMapper
 {
-    public static readonly string[] DefaultDeepTags =
+    public static readonly string[] DefaultNonDeepTags =
     [
-        "deep",
-        "deepwork",
-        "deep-work",
-        "focus",
-        "focused",
-        "pomodoro"
+        "admin",
+        "meeting",
+        "meetings",
+        "shallow",
+        "break",
+        "lunch",
+        "email",
+        "emails",
+        "slack",
+        "chat",
+        "call",
+        "calls"
     ];
 
     private static readonly Dictionary<WorkCategory, string[]> DefaultAliases = new()

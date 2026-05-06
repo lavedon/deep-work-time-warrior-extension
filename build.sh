@@ -14,7 +14,7 @@ Commands:
   build       Restore and build the project in Release mode
   publish     Build a native AOT binary into artifacts/publish/<rid> (default)
   run         Run the app with dotnet run. Remaining args are passed to the app
-  install     Publish, then install the binary to ~/bin/deepwork
+  install     Publish, then install the binary to ~/.local/bin/deepwork
   clean       Remove bin, obj, and artifacts
   help        Show this help
 
@@ -22,6 +22,7 @@ Environment variables:
   CONFIGURATION   Build configuration. Default: Release
   RID             Runtime identifier. Auto-detected by default
   PUBLISH_DIR     Publish output directory. Default: artifacts/publish/<rid>
+  INSTALL_DIR     Install directory. Default: ~/.local/bin
 
 Examples:
   ./build.sh
@@ -88,14 +89,18 @@ run_publish() {
 run_install() {
   run_publish
 
-  local install_dir="$HOME/bin"
+  local install_dir="${INSTALL_DIR:-$HOME/.local/bin}"
   mkdir -p "$install_dir"
   cp "$PUBLISH_DIR/$APP_NAME" "$install_dir/$APP_NAME"
   chmod +x "$install_dir/$APP_NAME"
 
   echo
   echo "Installed: $install_dir/$APP_NAME"
-  echo "If ~/bin is on PATH, run: $APP_NAME --help"
+  if [[ ":$PATH:" == *":$install_dir:"* ]]; then
+    echo "Run: $APP_NAME --help"
+  else
+    echo "Note: $install_dir is not on PATH. Add it or run with the full path above."
+  fi
 }
 
 run_clean() {
