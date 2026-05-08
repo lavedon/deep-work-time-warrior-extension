@@ -42,6 +42,19 @@ public static class Cli
             return 1;
         }
 
+        if (options.Command == "dashboard" || options.Goals.Count > 0 || options.ClearGoals)
+        {
+            try
+            {
+                await ConfigureGoalsAsync(options);
+            }
+            catch (Exception ex)
+            {
+                PrintError(ex.Message);
+                return 1;
+            }
+        }
+
         var today = DateOnly.FromDateTime(DateTime.Now);
         if (options.Command == "blocks" && options.From is null && options.To is null && !options.DaysSpecified)
             options.Days = 1;
@@ -62,6 +75,9 @@ public static class Cli
                 requestedFrom,
                 requestedTo.AddDays(-29),
                 TimeAnalyzer.GetWeekStart(requestedTo).AddDays(-7));
+
+            if (options.EffectiveGoals.Any(goal => goal.Cadence == GoalCadence.Weekly))
+                analysisFrom = MinDate(analysisFrom, TimeAnalyzer.GetWeekStart(requestedFrom));
         }
 
         List<TrackedInterval> intervals;
@@ -85,6 +101,31 @@ public static class Cli
         }
 
         return 0;
+    }
+
+    private static async Task ConfigureGoalsAsync(AppOptions options)
+    {
+        var newGoals = options.Goals.ToList();
+        options.Goals.Clear();
+
+        var goalStore = GoalStore.Create(options.GoalsFile);
+        var savedGoals = options.ClearGoals ? new List<DeepWorkGoal>() : await goalStore.LoadAsync();
+
+        if (newGoals.Count > 0)
+        {
+            var mergedGoals = GoalStore.Merge(savedGoals, newGoals);
+            await goalStore.SaveAsync(mergedGoals);
+            options.Goals.AddRange(mergedGoals);
+            return;
+        }
+
+        if (options.ClearGoals)
+        {
+            await goalStore.ClearAsync();
+            return;
+        }
+
+        options.Goals.AddRange(savedGoals);
     }
 
     private static async Task<List<TrackedInterval>> LoadIntervalsAsync(AppOptions options, DateOnly fromInclusive, DateOnly toInclusive)
@@ -229,7 +270,7 @@ public static class Cli
         DateOnly analysisFrom,
         DateOnly from,
         DateOnly to,
-        IReadOnlyList<DailyGoal> goals,
+        IReadOnlyList<DeepWorkGoal> goals,
         DateOnly today)
     {
         for (var i = 0; i < goals.Count; i++)
@@ -241,19 +282,22 @@ public static class Cli
                 to,
                 interval => interval.IsDeepWork && MatchesGoal(interval, goal));
 
-            RenderGoal(analyzer, dailyDeepTotals, from, to, goal, today);
+            if (goal.Cadence == GoalCadence.Weekly)
+                RenderWeeklyGoal(analyzer, dailyDeepTotals, from, to, goal, today);
+            else
+                RenderDailyGoal(analyzer, dailyDeepTotals, from, to, goal, today);
 
             if (i < goals.Count - 1)
                 AnsiConsole.WriteLine();
         }
     }
 
-    private static void RenderGoal(
+    private static void RenderDailyGoal(
         TimeAnalyzer analyzer,
         Dictionary<DateOnly, TimeSpan> dailyDeepTotals,
         DateOnly from,
         DateOnly to,
-        DailyGoal goal,
+        DeepWorkGoal goal,
         DateOnly today)
     {
         var selectedDayTotal = analyzer.GetTotalForDay(dailyDeepTotals, to);
@@ -264,9 +308,7 @@ public static class Cli
         var yesterdayStreak = to > from ? analyzer.CalculateCurrentStreak(dailyDeepTotals, to.AddDays(-1), goal.Duration) : 0;
         var longestStreak = analyzer.CalculateLongestStreak(dailyDeepTotals, from, to, goal.Duration);
         var color = goal.Color;
-        var target = goal.Category is null
-            ? $"tag [bold]{Markup.Escape(goal.Label)}[/]"
-            : $"{Markup.Escape(goal.DisplayName)} category";
+        var target = FormatGoalTarget(goal);
 
         var goalTable = new Table()
             .Border(TableBorder.None)
@@ -287,17 +329,81 @@ public static class Cli
         goalTable.AddRow("Longest streak in range", $"[bold]{longestStreak}[/] day(s)");
 
         AnsiConsole.Write(new Panel(goalTable)
-            .Header($"[bold {color}]{Markup.Escape(goal.DisplayName)} Deep Work Goal[/]")
+            .Header($"[bold {color}]{Markup.Escape(goal.DisplayName)} Daily Deep Work Goal[/]")
             .Border(BoxBorder.Rounded)
             .BorderStyle(color));
     }
 
-    private static bool MatchesGoal(TrackedInterval interval, DailyGoal goal)
+    private static void RenderWeeklyGoal(
+        TimeAnalyzer analyzer,
+        Dictionary<DateOnly, TimeSpan> dailyDeepTotals,
+        DateOnly from,
+        DateOnly to,
+        DeepWorkGoal goal,
+        DateOnly today)
+    {
+        var selectedWeekStart = TimeAnalyzer.GetWeekStart(to);
+        var selectedWeekTotal = analyzer.GetWeekTotal(dailyDeepTotals, selectedWeekStart);
+        var remaining = goal.Duration > selectedWeekTotal ? goal.Duration - selectedWeekTotal : TimeSpan.Zero;
+        var goalWeeks = analyzer.CountGoalWeeks(dailyDeepTotals, from, to, goal.Duration);
+        var totalWeeks = analyzer.CountWeeks(from, to);
+        var currentStreak = analyzer.CalculateCurrentWeekStreak(dailyDeepTotals, to, goal.Duration);
+        var previousWeekStreak = analyzer.CalculateCurrentWeekStreak(dailyDeepTotals, selectedWeekStart.AddDays(-1), goal.Duration);
+        var longestStreak = analyzer.CalculateLongestWeekStreak(dailyDeepTotals, from, to, goal.Duration);
+        var lastWeekStart = selectedWeekStart.AddDays(-7);
+        var lastWeekTotal = analyzer.GetWeekTotal(dailyDeepTotals, lastWeekStart);
+        var color = goal.Color;
+        var target = FormatGoalTarget(goal);
+        var selectedWeekLabel = selectedWeekStart == TimeAnalyzer.GetWeekStart(today) && to == today
+            ? "This week"
+            : $"Week of {selectedWeekStart.ToString("MMM dd", CultureInfo.InvariantCulture)}";
+
+        var goalTable = new Table()
+            .Border(TableBorder.None)
+            .HideHeaders()
+            .AddColumn("Metric")
+            .AddColumn("Value");
+
+        goalTable.AddRow("Weekly target", $"[bold {color}]{TimeAnalyzer.FormatDuration(goal.Duration)}[/] deep work for {target}");
+        goalTable.AddRow($"{selectedWeekLabel} ({FormatWeekRange(selectedWeekStart)})",
+            $"{ColorDuration(selectedWeekTotal, color, bold: true)} [grey]({TimeAnalyzer.FormatPercent(Ratio(selectedWeekTotal, goal.Duration))})[/]");
+        goalTable.AddRow("Remaining", remaining == TimeSpan.Zero ? "[green]met[/]" : $"[yellow]{TimeAnalyzer.FormatDuration(remaining)}[/]");
+        goalTable.AddRow($"Last week ({FormatWeekRange(lastWeekStart)})",
+            $"{ColorDuration(lastWeekTotal, color)} [grey]({TimeAnalyzer.FormatPercent(Ratio(lastWeekTotal, goal.Duration))})[/]");
+        goalTable.AddRow($"Goal weeks ({TimeAnalyzer.GetWeekStart(from):MMM dd}–{TimeAnalyzer.GetWeekStart(to):MMM dd})", $"[bold]{goalWeeks}/{totalWeeks}[/]");
+        goalTable.AddRow("Current weekly streak", $"[bold]{currentStreak}[/] week(s)");
+
+        if (selectedWeekStart == TimeAnalyzer.GetWeekStart(today) && to == today && currentStreak == 0 && previousWeekStreak > 0)
+            goalTable.AddRow("Streak through last week", $"[bold]{previousWeekStreak}[/] week(s)");
+
+        goalTable.AddRow("Longest weekly streak in range", $"[bold]{longestStreak}[/] week(s)");
+        goalTable.AddRow("Week starts", "[bold]Monday[/]");
+
+        AnsiConsole.Write(new Panel(goalTable)
+            .Header($"[bold {color}]{Markup.Escape(goal.DisplayName)} Weekly Deep Work Goal[/]")
+            .Border(BoxBorder.Rounded)
+            .BorderStyle(color));
+    }
+
+    private static bool MatchesGoal(TrackedInterval interval, DeepWorkGoal goal)
     {
         if (goal.Category is WorkCategory category)
             return interval.Category == category;
 
         return interval.Tags.Any(tag => CategoryMapper.NormalizeTag(tag) == goal.NormalizedTag);
+    }
+
+    private static string FormatGoalTarget(DeepWorkGoal goal)
+    {
+        return goal.Category is null
+            ? $"tag [bold]{Markup.Escape(goal.Label)}[/]"
+            : $"{Markup.Escape(goal.DisplayName)} category";
+    }
+
+    private static string FormatWeekRange(DateOnly weekStart)
+    {
+        var weekEnd = weekStart.AddDays(6);
+        return $"Mon {weekStart.ToString("MMM dd", CultureInfo.InvariantCulture)}–Sun {weekEnd.ToString("MMM dd", CultureInfo.InvariantCulture)}";
     }
 
     private static void RenderBlocksRange(AppOptions options, List<TrackedInterval> intervals, DateOnly from, DateOnly to)
@@ -419,19 +525,32 @@ public static class Cli
         AnsiConsole.WriteLine();
         AnsiConsole.MarkupLine("[bold]Examples[/]");
         AnsiConsole.MarkupLine("  [grey]deepwork --job-goal 3h[/]");
-        AnsiConsole.MarkupLine("  [grey]deepwork --goal writing=2h[/]");
+        AnsiConsole.MarkupLine("  [grey]deepwork --goals job 3h[/]");
+        AnsiConsole.MarkupLine("  [grey]deepwork --goals-week job 30h[/]");
+        AnsiConsole.MarkupLine("  [grey]deepwork --goal writing=2h --goal-week writing=10h[/]");
+        AnsiConsole.MarkupLine("  [grey]deepwork --clear-goals[/]");
         AnsiConsole.MarkupLine("  [grey]deepwork --lc-review-goal 1h --anki-goal 30m[/]");
         AnsiConsole.MarkupLine("  [grey]deepwork --non-deep-tags admin,meeting,break,email[/]");
         AnsiConsole.MarkupLine("  [grey]deepwork blocks --days 7 --max-gap 90m[/]");
         AnsiConsole.MarkupLine("  [grey]timew export :month > sample.json && deepwork --file sample.json[/]");
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine($"[grey]Goal flags are saved as defaults in {Markup.Escape(GoalStore.Create().FilePath)} and reused on future runs.[/]");
+        AnsiConsole.MarkupLine("[grey]Passing the same goal again updates its saved duration.[/]");
         AnsiConsole.WriteLine();
         AnsiConsole.MarkupLine("[bold]Options[/]");
         AnsiConsole.MarkupLine("  [yellow]--days <n>[/]              Days to display/analyze when --from is omitted. Default: 30; blocks default: 1.");
         AnsiConsole.MarkupLine("  [yellow]--from <yyyy-MM-dd>[/]     Start date.");
         AnsiConsole.MarkupLine("  [yellow]--to <yyyy-MM-dd>[/]       End date. Default: today.");
         AnsiConsole.MarkupLine("  [yellow]--job-goal <duration>[/]   Daily deep-work goal for Job. Default goal when no custom goal is supplied: 3h.");
+        AnsiConsole.MarkupLine("  [yellow]--job-goal-week <duration>[/] Weekly deep-work goal for Job; weeks start Monday.");
         AnsiConsole.MarkupLine("  [yellow]--goal <tag=duration>[/]   Daily deep-work goal for any tag; repeatable.");
-        AnsiConsole.MarkupLine("  [yellow]--<tag>-goal <duration>[/] Shorthand for a tag goal, e.g. --anki-goal 30m.");
+        AnsiConsole.MarkupLine("  [yellow]--goals <tag> <duration>[/] Daily deep-work goal for any tag; repeatable.");
+        AnsiConsole.MarkupLine("  [yellow]--goal-week <tag=duration>[/] Weekly deep-work goal for any tag; weeks start Monday.");
+        AnsiConsole.MarkupLine("  [yellow]--goals-week <tag> <duration>[/] Weekly deep-work goal for any tag; weeks start Monday.");
+        AnsiConsole.MarkupLine("  [yellow]--<tag>-goal <duration>[/] Shorthand for a daily tag goal, e.g. --anki-goal 30m.");
+        AnsiConsole.MarkupLine("  [yellow]--<tag>-goal-week <duration>[/] Shorthand for a weekly tag goal.");
+        AnsiConsole.MarkupLine("  [yellow]--goals-file <path>[/]     JSON file for saved default goals.");
+        AnsiConsole.MarkupLine("  [yellow]--clear-goals[/]           Delete saved default goals; combine with goal flags to replace them.");
         AnsiConsole.MarkupLine("  [yellow]--max-gap <duration>[/]    Same-category block merge gap. Default: 2h.");
         AnsiConsole.MarkupLine("  [yellow]--non-deep-tags <csv>[/]   Tags that exclude intervals from deep work. Default: admin, meeting, shallow, break, lunch, email, slack, chat, call.");
         AnsiConsole.MarkupLine("  [yellow]--file <path>[/]           Read Timewarrior export JSON from a file instead of running timew.");
@@ -462,11 +581,21 @@ public static class Cli
                 if (inlineValue is not null)
                     return inlineValue;
 
+                return RequireNextValue();
+            }
+
+            string RequireNextValue()
+            {
                 if (index + 1 >= args.Length)
                     throw new ArgumentException($"Missing value for {name}.");
 
                 index++;
                 return args[index];
+            }
+
+            DeepWorkGoal RequireGoalPairOrAssignment(GoalCadence cadence)
+            {
+                return ParseTagGoalPairOrAssignment(RequireValue(), RequireNextValue, name, cadence);
             }
 
             switch (name)
@@ -495,14 +624,43 @@ public static class Cli
                     options.To = ParseDate(RequireValue(), name);
                     break;
 
+                case "--goals-file":
+                    options.GoalsFile = RequireValue();
+                    break;
+
+                case "--clear-goals":
+                    options.ClearGoals = ReadOptionalBool(inlineValue);
+                    break;
+
                 case "--job-goal":
                 case "--goal-job-daily":
-                    options.Goals.Add(DailyGoal.ForCategory(WorkCategory.Job, DurationParser.Parse(RequireValue(), name)));
+                    options.Goals.Add(DeepWorkGoal.ForCategory(WorkCategory.Job, DurationParser.Parse(RequireValue(), name)));
+                    break;
+
+                case "--job-goal-week":
+                case "--job-week-goal":
+                case "--goal-job-week":
+                case "--goal-job-weekly":
+                    options.Goals.Add(DeepWorkGoal.ForCategory(WorkCategory.Job, DurationParser.Parse(RequireValue(), name), GoalCadence.Weekly));
                     break;
 
                 case "--goal":
                 case "--tag-goal":
                     options.Goals.Add(ParseTagGoal(RequireValue(), name));
+                    break;
+
+                case "--goals":
+                case "--goal-daily":
+                case "--goals-daily":
+                    options.Goals.Add(RequireGoalPairOrAssignment(GoalCadence.Daily));
+                    break;
+
+                case "--goal-week":
+                case "--goals-week":
+                case "--weekly-goal":
+                case "--week-goal":
+                case "--tag-goal-week":
+                    options.Goals.Add(RequireGoalPairOrAssignment(GoalCadence.Weekly));
                     break;
 
                 case "--max-gap":
@@ -525,9 +683,9 @@ public static class Cli
                     break;
 
                 default:
-                    if (TryGetGoalTagFromOptionName(name, out var goalTag))
+                    if (TryGetGoalTagFromOptionName(name, out var goalTag, out var cadence))
                     {
-                        options.Goals.Add(DailyGoal.ForTag(goalTag, DurationParser.Parse(RequireValue(), name)));
+                        options.Goals.Add(DeepWorkGoal.ForTag(goalTag, DurationParser.Parse(RequireValue(), name), cadence));
                         break;
                     }
 
@@ -560,23 +718,54 @@ public static class Cli
         return (arg[..equalsIndex], arg[(equalsIndex + 1)..]);
     }
 
-    private static DailyGoal ParseTagGoal(string value, string optionName)
+    private static DeepWorkGoal ParseTagGoal(string value, string optionName, GoalCadence cadence = GoalCadence.Daily)
     {
-        var separatorIndex = value.IndexOf('=', StringComparison.Ordinal);
-        if (separatorIndex < 0)
-            separatorIndex = value.IndexOf(':', StringComparison.Ordinal);
+        var separatorIndex = FindGoalSeparator(value);
 
         if (separatorIndex <= 0 || separatorIndex == value.Length - 1)
             throw new ArgumentException($"{optionName} must use <tag=duration>, for example writing=2h.");
 
         var tag = value[..separatorIndex].Trim();
         var durationText = value[(separatorIndex + 1)..].Trim();
-        return DailyGoal.ForTag(tag, DurationParser.Parse(durationText, optionName));
+        return DeepWorkGoal.ForTag(tag, DurationParser.Parse(durationText, optionName), cadence);
     }
 
-    private static bool TryGetGoalTagFromOptionName(string optionName, out string tag)
+    private static DeepWorkGoal ParseTagGoalPairOrAssignment(
+        string firstValue,
+        Func<string> readDuration,
+        string optionName,
+        GoalCadence cadence)
+    {
+        if (FindGoalSeparator(firstValue) >= 0)
+            return ParseTagGoal(firstValue, optionName, cadence);
+
+        var tag = firstValue.Trim();
+        if (string.IsNullOrWhiteSpace(tag))
+            throw new ArgumentException($"{optionName} must use <tag> <duration> or <tag=duration>, for example writing 2h.");
+
+        var durationText = readDuration();
+        return DeepWorkGoal.ForTag(tag, DurationParser.Parse(durationText, optionName), cadence);
+    }
+
+    private static int FindGoalSeparator(string value)
+    {
+        var equalsIndex = value.IndexOf('=', StringComparison.Ordinal);
+        var colonIndex = value.IndexOf(':', StringComparison.Ordinal);
+
+        return (equalsIndex, colonIndex) switch
+        {
+            (>= 0, >= 0) => Math.Min(equalsIndex, colonIndex),
+            (>= 0, _) => equalsIndex,
+            (_, >= 0) => colonIndex,
+            _ => -1
+        };
+    }
+
+    private static bool TryGetGoalTagFromOptionName(string optionName, out string tag, out GoalCadence cadence)
     {
         tag = string.Empty;
+        cadence = GoalCadence.Daily;
+
         if (!optionName.StartsWith("--", StringComparison.Ordinal))
             return false;
 
@@ -584,8 +773,37 @@ public static class Cli
         const string goalSuffix = "-goal";
         const string goalDailyPrefix = "goal-";
         const string goalDailySuffix = "-daily";
+        const string goalWeekSuffix = "-goal-week";
+        const string weeklyGoalSuffix = "-weekly-goal";
+        const string goalPrefix = "goal-";
+        const string weekSuffix = "-week";
+        const string weeklySuffix = "-weekly";
 
-        if (name.EndsWith(goalSuffix, StringComparison.Ordinal) && name.Length > goalSuffix.Length)
+        if (name.EndsWith(goalWeekSuffix, StringComparison.Ordinal) && name.Length > goalWeekSuffix.Length)
+        {
+            tag = name[..^goalWeekSuffix.Length];
+            cadence = GoalCadence.Weekly;
+        }
+        else if (name.EndsWith(weeklyGoalSuffix, StringComparison.Ordinal) && name.Length > weeklyGoalSuffix.Length)
+        {
+            tag = name[..^weeklyGoalSuffix.Length];
+            cadence = GoalCadence.Weekly;
+        }
+        else if (name.StartsWith(goalPrefix, StringComparison.Ordinal)
+            && name.EndsWith(weekSuffix, StringComparison.Ordinal)
+            && name.Length > goalPrefix.Length + weekSuffix.Length)
+        {
+            tag = name[goalPrefix.Length..^weekSuffix.Length];
+            cadence = GoalCadence.Weekly;
+        }
+        else if (name.StartsWith(goalPrefix, StringComparison.Ordinal)
+            && name.EndsWith(weeklySuffix, StringComparison.Ordinal)
+            && name.Length > goalPrefix.Length + weeklySuffix.Length)
+        {
+            tag = name[goalPrefix.Length..^weeklySuffix.Length];
+            cadence = GoalCadence.Weekly;
+        }
+        else if (name.EndsWith(goalSuffix, StringComparison.Ordinal) && name.Length > goalSuffix.Length)
         {
             tag = name[..^goalSuffix.Length];
         }

@@ -104,6 +104,68 @@ public sealed class TimeAnalyzer
         return TimeSpan.FromTicks(totalTicks);
     }
 
+    public int CountWeeks(DateOnly fromInclusive, DateOnly toInclusive)
+    {
+        if (fromInclusive > toInclusive)
+            return 0;
+
+        var firstWeekStart = GetWeekStart(fromInclusive);
+        var lastWeekStart = GetWeekStart(toInclusive);
+        return ((lastWeekStart.DayNumber - firstWeekStart.DayNumber) / 7) + 1;
+    }
+
+    public int CountGoalWeeks(Dictionary<DateOnly, TimeSpan> dailyTotals, DateOnly fromInclusive, DateOnly toInclusive, TimeSpan goal)
+    {
+        var count = 0;
+        foreach (var weekStart in EnumerateWeekStarts(fromInclusive, toInclusive))
+        {
+            if (GetWeekTotal(dailyTotals, weekStart) >= goal)
+                count++;
+        }
+
+        return count;
+    }
+
+    public int CalculateCurrentWeekStreak(Dictionary<DateOnly, TimeSpan> dailyTotals, DateOnly endDate, TimeSpan goal)
+    {
+        if (dailyTotals.Count == 0)
+            return 0;
+
+        var earliestWeekStart = GetWeekStart(dailyTotals.Keys.Min());
+        var streak = 0;
+
+        for (var weekStart = GetWeekStart(endDate); weekStart >= earliestWeekStart; weekStart = weekStart.AddDays(-7))
+        {
+            if (GetWeekTotal(dailyTotals, weekStart) < goal)
+                break;
+
+            streak++;
+        }
+
+        return streak;
+    }
+
+    public int CalculateLongestWeekStreak(Dictionary<DateOnly, TimeSpan> dailyTotals, DateOnly fromInclusive, DateOnly toInclusive, TimeSpan goal)
+    {
+        var current = 0;
+        var longest = 0;
+
+        foreach (var weekStart in EnumerateWeekStarts(fromInclusive, toInclusive))
+        {
+            if (GetWeekTotal(dailyTotals, weekStart) >= goal)
+            {
+                current++;
+                longest = Math.Max(longest, current);
+            }
+            else
+            {
+                current = 0;
+            }
+        }
+
+        return longest;
+    }
+
     public int CountGoalDays(Dictionary<DateOnly, TimeSpan> dailyTotals, DateOnly fromInclusive, DateOnly toInclusive, TimeSpan goal)
     {
         var count = 0;
@@ -189,6 +251,16 @@ public sealed class TimeAnalyzer
         }
 
         return dailyTotals;
+    }
+
+    private static IEnumerable<DateOnly> EnumerateWeekStarts(DateOnly fromInclusive, DateOnly toInclusive)
+    {
+        if (fromInclusive > toInclusive)
+            yield break;
+
+        var lastWeekStart = GetWeekStart(toInclusive);
+        for (var weekStart = GetWeekStart(fromInclusive); weekStart <= lastWeekStart; weekStart = weekStart.AddDays(7))
+            yield return weekStart;
     }
 
     private static IEnumerable<(DateOnly Date, TimeSpan Duration)> SplitByLocalDay(DateTimeOffset start, DateTimeOffset end)

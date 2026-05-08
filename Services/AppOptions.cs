@@ -10,14 +10,16 @@ public sealed class AppOptions
     public DateOnly? From { get; set; }
     public DateOnly? To { get; set; }
     public TimeSpan MaxGap { get; set; } = TimeSpan.FromHours(2);
-    public List<DailyGoal> Goals { get; } = [];
+    public List<DeepWorkGoal> Goals { get; } = [];
     public string? ExportFile { get; set; }
+    public string? GoalsFile { get; set; }
+    public bool ClearGoals { get; set; }
     public bool Help { get; set; }
     public bool ListAliases { get; set; }
     public HashSet<string> NonDeepTags { get; } = CategoryMapper.NormalizeSet(CategoryMapper.DefaultNonDeepTags);
 
-    public IReadOnlyList<DailyGoal> EffectiveGoals => Goals.Count == 0
-        ? [DailyGoal.ForCategory(WorkCategory.Job, TimeSpan.FromHours(3))]
+    public IReadOnlyList<DeepWorkGoal> EffectiveGoals => Goals.Count == 0
+        ? [DeepWorkGoal.ForCategory(WorkCategory.Job, TimeSpan.FromHours(3))]
         : Goals;
 
     public DateOnly EffectiveTo(DateOnly today) => To ?? today;
