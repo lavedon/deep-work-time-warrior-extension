@@ -24,8 +24,11 @@ public sealed class CategoryMapper
     private static readonly Dictionary<WorkCategory, string[]> DefaultAliases = new()
     {
         [WorkCategory.Job] = ["job", "work", "dayjob", "coding", "engineering"],
-        [WorkCategory.LCReview] = ["lcreview", "lc-review", "leetcode-review", "leetcode_review", "review"],
-        [WorkCategory.LCNew] = ["lcnew", "lc-new", "leetcode-new", "leetcode_new", "newproblems", "new-problems"],
+        [WorkCategory.Leetcode] = [
+            "leetcode", "lc",
+            "lcreview", "lc-review", "leetcode-review", "leetcode_review", "review",
+            "lcnew", "lc-new", "leetcode-new", "leetcode_new", "newproblems", "new-problems"
+        ],
         [WorkCategory.Anki] = ["anki", "flashcards", "spacedrepetition", "spaced-repetition"],
         [WorkCategory.Okta] = ["okta"]
     };
@@ -62,6 +65,18 @@ public sealed class CategoryMapper
         }
 
         return WorkCategory.Other;
+    }
+
+    public bool TryMapTag(string tag, out WorkCategory category)
+    {
+        return _aliases.TryGetValue(NormalizeTag(tag), out category);
+    }
+
+    private static readonly Lazy<CategoryMapper> _defaultInstance = new(CreateDefault);
+
+    public static bool TryMapTagToCategory(string tag, out WorkCategory category)
+    {
+        return _defaultInstance.Value.TryMapTag(tag, out category);
     }
 
     public static bool HasAnyNormalizedTag(IEnumerable<string> tags, ISet<string> normalizedNeedles)

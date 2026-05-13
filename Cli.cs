@@ -387,14 +387,33 @@ public static class Cli
 
     private static bool MatchesGoal(TrackedInterval interval, DeepWorkGoal goal)
     {
-        if (goal.Category is WorkCategory category)
-            return interval.Category == category;
+        foreach (var component in goal.Components)
+        {
+            if (component.Category is WorkCategory category)
+            {
+                if (interval.Category == category)
+                    return true;
+            }
+            else if (interval.Tags.Any(tag => CategoryMapper.NormalizeTag(tag) == component.NormalizedTag))
+            {
+                return true;
+            }
+        }
 
-        return interval.Tags.Any(tag => CategoryMapper.NormalizeTag(tag) == goal.NormalizedTag);
+        return false;
     }
 
     private static string FormatGoalTarget(DeepWorkGoal goal)
     {
+        if (goal.IsComposite)
+        {
+            var parts = goal.Components.Select(component => component.Category is WorkCategory category
+                ? $"[bold]{Markup.Escape(category.DisplayName())}[/]"
+                : $"tag [bold]{Markup.Escape(component.Label)}[/]");
+
+            return string.Join(" + ", parts);
+        }
+
         return goal.Category is null
             ? $"tag [bold]{Markup.Escape(goal.Label)}[/]"
             : $"{Markup.Escape(goal.DisplayName)} category";
@@ -510,6 +529,7 @@ public static class Cli
         AnsiConsole.WriteLine();
         AnsiConsole.MarkupLine($"[grey]Non-deep tags:[/] {Markup.Escape(FormatTagList(options.NonDeepTags))}");
         AnsiConsole.MarkupLine("[grey]Tip:[/] tags are normalized, so lc-review, LCReview, and lc_review are equivalent.");
+        AnsiConsole.MarkupLine("[grey]Tip:[/] combine tags with [yellow]+[/] in a goal, e.g. [grey]--goal study=okta+leetcode 4h[/].");
     }
 
     private static void RenderHelp()
@@ -528,8 +548,10 @@ public static class Cli
         AnsiConsole.MarkupLine("  [grey]deepwork --goals job 3h[/]");
         AnsiConsole.MarkupLine("  [grey]deepwork --goals-week job 30h[/]");
         AnsiConsole.MarkupLine("  [grey]deepwork --goal writing=2h --goal-week writing=10h[/]");
+        AnsiConsole.MarkupLine("  [grey]deepwork --goal study=okta+leetcode 4h[/]");
+        AnsiConsole.MarkupLine("  [grey]deepwork --goal-week study=okta+leetcode 25h[/]");
         AnsiConsole.MarkupLine("  [grey]deepwork --clear-goals[/]");
-        AnsiConsole.MarkupLine("  [grey]deepwork --lc-review-goal 1h --anki-goal 30m[/]");
+        AnsiConsole.MarkupLine("  [grey]deepwork --leetcode-goal 1h --anki-goal 30m[/]");
         AnsiConsole.MarkupLine("  [grey]deepwork --non-deep-tags admin,meeting,break,email[/]");
         AnsiConsole.MarkupLine("  [grey]deepwork blocks --days 7 --max-gap 90m[/]");
         AnsiConsole.MarkupLine("  [grey]timew export :month > sample.json && deepwork --file sample.json[/]");
@@ -547,6 +569,7 @@ public static class Cli
         AnsiConsole.MarkupLine("  [yellow]--goals <tag> <duration>[/] Daily deep-work goal for any tag; repeatable.");
         AnsiConsole.MarkupLine("  [yellow]--goal-week <tag=duration>[/] Weekly deep-work goal for any tag; weeks start Monday.");
         AnsiConsole.MarkupLine("  [yellow]--goals-week <tag> <duration>[/] Weekly deep-work goal for any tag; weeks start Monday.");
+        AnsiConsole.MarkupLine("  [yellow]--goal <label>=<a>+<b> <duration>[/] Composite goal summing time from multiple tags/categories.");
         AnsiConsole.MarkupLine("  [yellow]--<tag>-goal <duration>[/] Shorthand for a daily tag goal, e.g. --anki-goal 30m.");
         AnsiConsole.MarkupLine("  [yellow]--<tag>-goal-week <duration>[/] Shorthand for a weekly tag goal.");
         AnsiConsole.MarkupLine("  [yellow]--goals-file <path>[/]     JSON file for saved default goals.");
@@ -644,9 +667,21 @@ public static class Cli
                     options.Goals.Add(DeepWorkGoal.ForCategory(WorkCategory.Job, DurationParser.Parse(RequireValue(), name), GoalCadence.Weekly));
                     break;
 
+                case "--leetcode-goal":
+                case "--goal-leetcode-daily":
+                    options.Goals.Add(DeepWorkGoal.ForCategory(WorkCategory.Leetcode, DurationParser.Parse(RequireValue(), name)));
+                    break;
+
+                case "--leetcode-goal-week":
+                case "--leetcode-week-goal":
+                case "--goal-leetcode-week":
+                case "--goal-leetcode-weekly":
+                    options.Goals.Add(DeepWorkGoal.ForCategory(WorkCategory.Leetcode, DurationParser.Parse(RequireValue(), name), GoalCadence.Weekly));
+                    break;
+
                 case "--goal":
                 case "--tag-goal":
-                    options.Goals.Add(ParseTagGoal(RequireValue(), name));
+                    options.Goals.Add(ParseTagGoal(RequireValue(), RequireNextValue, name));
                     break;
 
                 case "--goals":
@@ -718,8 +753,11 @@ public static class Cli
         return (arg[..equalsIndex], arg[(equalsIndex + 1)..]);
     }
 
-    private static DeepWorkGoal ParseTagGoal(string value, string optionName, GoalCadence cadence = GoalCadence.Daily)
+    private static DeepWorkGoal ParseTagGoal(string value, Func<string> readNextValue, string optionName, GoalCadence cadence = GoalCadence.Daily)
     {
+        if (value.Contains('+'))
+            return ParseCompositeGoal(value, readNextValue, optionName, cadence);
+
         var separatorIndex = FindGoalSeparator(value);
 
         if (separatorIndex <= 0 || separatorIndex == value.Length - 1)
@@ -732,19 +770,72 @@ public static class Cli
 
     private static DeepWorkGoal ParseTagGoalPairOrAssignment(
         string firstValue,
-        Func<string> readDuration,
+        Func<string> readNextValue,
         string optionName,
         GoalCadence cadence)
     {
+        if (firstValue.Contains('+'))
+            return ParseCompositeGoal(firstValue, readNextValue, optionName, cadence);
+
         if (FindGoalSeparator(firstValue) >= 0)
-            return ParseTagGoal(firstValue, optionName, cadence);
+            return ParseTagGoal(firstValue, readNextValue, optionName, cadence);
 
         var tag = firstValue.Trim();
         if (string.IsNullOrWhiteSpace(tag))
             throw new ArgumentException($"{optionName} must use <tag> <duration> or <tag=duration>, for example writing 2h.");
 
-        var durationText = readDuration();
+        var durationText = readNextValue();
         return DeepWorkGoal.ForTag(tag, DurationParser.Parse(durationText, optionName), cadence);
+    }
+
+    private static DeepWorkGoal ParseCompositeGoal(
+        string firstValue,
+        Func<string> readNextValue,
+        string optionName,
+        GoalCadence cadence)
+    {
+        var firstPlus = firstValue.IndexOf('+', StringComparison.Ordinal);
+        var lastPlus = firstValue.LastIndexOf('+');
+
+        var labelSeparator = FindGoalSeparator(firstValue[..firstPlus]);
+        string label;
+        int tagsStart;
+
+        if (labelSeparator >= 0)
+        {
+            label = firstValue[..labelSeparator].Trim();
+            tagsStart = labelSeparator + 1;
+        }
+        else
+        {
+            label = string.Empty;
+            tagsStart = 0;
+        }
+
+        var afterLastPlus = firstValue[(lastPlus + 1)..];
+        var trailingSeparator = FindGoalSeparator(afterLastPlus);
+
+        string tagsRaw;
+        string durationText;
+
+        if (trailingSeparator >= 0)
+        {
+            var absoluteSeparator = lastPlus + 1 + trailingSeparator;
+            tagsRaw = firstValue[tagsStart..absoluteSeparator];
+            durationText = firstValue[(absoluteSeparator + 1)..].Trim();
+        }
+        else
+        {
+            tagsRaw = firstValue[tagsStart..];
+            durationText = readNextValue().Trim();
+        }
+
+        var tagParts = tagsRaw.Split('+', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        if (tagParts.Length == 0)
+            throw new ArgumentException($"{optionName} must list at least one tag, for example study=okta+leetcode 4h.");
+
+        var components = tagParts.Select(GoalComponent.ForTag).ToArray();
+        return DeepWorkGoal.Composite(label, components, DurationParser.Parse(durationText, optionName), cadence);
     }
 
     private static int FindGoalSeparator(string value)

@@ -141,6 +141,24 @@ public sealed class GoalStore
 
         var duration = DurationParser.Parse(durationText, $"goals file goal #{index}");
 
+        if (TryGetProperty(element, "components", out var componentsElement)
+            && componentsElement.ValueKind == JsonValueKind.Array)
+        {
+            var components = new List<GoalComponent>();
+            var componentIndex = 0;
+            foreach (var componentElement in componentsElement.EnumerateArray())
+            {
+                componentIndex++;
+                components.Add(ReadComponent(componentElement, index, componentIndex));
+            }
+
+            if (components.Count == 0)
+                throw new InvalidOperationException($"Goal #{index} in the goals file has an empty 'components' array.");
+
+            TryGetString(element, "label", out var label);
+            return DeepWorkGoal.Composite(label, components, duration, cadence);
+        }
+
         if (TryGetString(element, "category", out var categoryText))
         {
             if (!TryParseCategory(categoryText, out var category))
@@ -152,7 +170,29 @@ public sealed class GoalStore
         if (TryGetString(element, "tag", out var tag))
             return DeepWorkGoal.ForTag(tag, duration, cadence);
 
-        throw new InvalidOperationException($"Goal #{index} in the goals file must specify either 'tag' or 'category'.");
+        throw new InvalidOperationException($"Goal #{index} in the goals file must specify 'tag', 'category', or 'components'.");
+    }
+
+    private static GoalComponent ReadComponent(JsonElement element, int goalIndex, int componentIndex)
+    {
+        if (element.ValueKind == JsonValueKind.String)
+            return GoalComponent.ForTag(element.GetString() ?? string.Empty);
+
+        if (element.ValueKind != JsonValueKind.Object)
+            throw new InvalidOperationException($"Goal #{goalIndex} component #{componentIndex} must be a string or object.");
+
+        if (TryGetString(element, "category", out var categoryText))
+        {
+            if (!TryParseCategory(categoryText, out var category))
+                throw new InvalidOperationException($"Goal #{goalIndex} component #{componentIndex} has unknown category '{categoryText}'.");
+
+            return GoalComponent.ForCategory(category);
+        }
+
+        if (TryGetString(element, "tag", out var tag))
+            return GoalComponent.ForTag(tag);
+
+        throw new InvalidOperationException($"Goal #{goalIndex} component #{componentIndex} must specify 'tag' or 'category'.");
     }
 
     private static void WriteGoal(Utf8JsonWriter writer, DeepWorkGoal goal)
@@ -160,10 +200,30 @@ public sealed class GoalStore
         writer.WriteStartObject();
         writer.WriteString("cadence", goal.Cadence == GoalCadence.Weekly ? "weekly" : "daily");
 
-        if (goal.Category is WorkCategory category)
+        if (goal.IsComposite)
+        {
+            writer.WriteString("label", goal.Label);
+            writer.WritePropertyName("components");
+            writer.WriteStartArray();
+            foreach (var component in goal.Components)
+            {
+                writer.WriteStartObject();
+                if (component.Category is WorkCategory componentCategory)
+                    writer.WriteString("category", componentCategory.DisplayName());
+                else
+                    writer.WriteString("tag", component.Label);
+                writer.WriteEndObject();
+            }
+            writer.WriteEndArray();
+        }
+        else if (goal.Category is WorkCategory category)
+        {
             writer.WriteString("category", category.DisplayName());
+        }
         else
+        {
             writer.WriteString("tag", goal.Label);
+        }
 
         writer.WriteString("duration", FormatDurationForConfig(goal.Duration));
         writer.WriteEndObject();
@@ -181,10 +241,18 @@ public sealed class GoalStore
 
     private static bool TryParseCategory(string value, out WorkCategory category)
     {
+        var normalized = CategoryMapper.NormalizeTag(value);
+
+        if (normalized is "lcreview" or "lcnew")
+        {
+            category = WorkCategory.Leetcode;
+            return true;
+        }
+
         foreach (var candidate in Enum.GetValues<WorkCategory>())
         {
             if (string.Equals(value, candidate.ToString(), StringComparison.OrdinalIgnoreCase)
-                || CategoryMapper.NormalizeTag(value) == CategoryMapper.NormalizeTag(candidate.DisplayName()))
+                || normalized == CategoryMapper.NormalizeTag(candidate.DisplayName()))
             {
                 category = candidate;
                 return true;
@@ -231,6 +299,9 @@ public sealed class GoalStore
 
     private static string GetGoalKey(DeepWorkGoal goal)
     {
+        if (goal.IsComposite)
+            return $"{goal.Cadence}:composite:{CategoryMapper.NormalizeTag(goal.Label)}";
+
         var target = goal.Category is WorkCategory category
             ? $"category:{category}"
             : $"tag:{goal.NormalizedTag}";
