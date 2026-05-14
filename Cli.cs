@@ -35,6 +35,20 @@ public static class Cli
             return 0;
         }
 
+        if (options.Command == "goals")
+        {
+            try
+            {
+                await InteractiveGoals.RunAsync(GoalStore.Create(options.GoalsFile));
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                PrintError(ex.Message);
+                return 1;
+            }
+        }
+
         if (options.Command is not ("dashboard" or "blocks"))
         {
             PrintError($"Unknown command '{options.Command}'.");
@@ -42,7 +56,7 @@ public static class Cli
             return 1;
         }
 
-        if (options.Command == "dashboard" || options.Goals.Count > 0 || options.ClearGoals)
+        if (options.Command == "dashboard" || options.Goals.Count > 0 || options.ClearGoals || options.SkipDaysByGoal.Count > 0)
         {
             try
             {
@@ -110,22 +124,60 @@ public static class Cli
 
         var goalStore = GoalStore.Create(options.GoalsFile);
         var savedGoals = options.ClearGoals ? new List<DeepWorkGoal>() : await goalStore.LoadAsync();
+        var mergedGoals = newGoals.Count > 0
+            ? GoalStore.Merge(savedGoals, newGoals)
+            : savedGoals.ToList();
 
-        if (newGoals.Count > 0)
+        if (options.SkipDaysByGoal.Count > 0)
+            mergedGoals = ApplySkipDayOverrides(mergedGoals, options.SkipDaysByGoal);
+
+        var hasChanges = newGoals.Count > 0 || options.SkipDaysByGoal.Count > 0;
+
+        if (hasChanges)
         {
-            var mergedGoals = GoalStore.Merge(savedGoals, newGoals);
             await goalStore.SaveAsync(mergedGoals);
-            options.Goals.AddRange(mergedGoals);
-            return;
         }
-
-        if (options.ClearGoals)
+        else if (options.ClearGoals)
         {
             await goalStore.ClearAsync();
-            return;
         }
 
-        options.Goals.AddRange(savedGoals);
+        options.Goals.AddRange(mergedGoals);
+    }
+
+    private static List<DeepWorkGoal> ApplySkipDayOverrides(
+        IReadOnlyList<DeepWorkGoal> goals,
+        IReadOnlyDictionary<string, IReadOnlySet<DayOfWeek>> overrides)
+    {
+        var result = goals.ToList();
+        foreach (var (label, days) in overrides)
+        {
+            var normalized = CategoryMapper.NormalizeTag(label);
+            var index = result.FindIndex(g => CategoryMapper.NormalizeTag(g.Label) == normalized);
+            if (index < 0)
+                throw new ArgumentException($"--skip-days references unknown goal '{label}'. Add the goal first, e.g. --goal {label}=3h.");
+
+            result[index] = result[index].WithSkipDays(days);
+        }
+
+        return result;
+    }
+
+    private static void ParseSkipDaysFlag(
+        string value,
+        string optionName,
+        Dictionary<string, IReadOnlySet<DayOfWeek>> map)
+    {
+        var separatorIndex = FindGoalSeparator(value);
+        if (separatorIndex < 0)
+            throw new ArgumentException($"{optionName} must use <label=days>, for example job=sat,sun.");
+
+        var label = value[..separatorIndex].Trim();
+        if (string.IsNullOrWhiteSpace(label))
+            throw new ArgumentException($"{optionName}: goal label must not be empty.");
+
+        var daysRaw = value[(separatorIndex + 1)..].Trim();
+        map[label] = DayOfWeekParser.ParseList(daysRaw, optionName);
     }
 
     private static async Task<List<TrackedInterval>> LoadIntervalsAsync(AppOptions options, DateOnly fromInclusive, DateOnly toInclusive)
@@ -300,13 +352,15 @@ public static class Cli
         DeepWorkGoal goal,
         DateOnly today)
     {
+        var skipDays = goal.SkipDays;
+        var todayIsSkipped = skipDays.Contains(to.DayOfWeek);
         var selectedDayTotal = analyzer.GetTotalForDay(dailyDeepTotals, to);
         var remaining = goal.Duration > selectedDayTotal ? goal.Duration - selectedDayTotal : TimeSpan.Zero;
-        var goalDays = analyzer.CountGoalDays(dailyDeepTotals, from, to, goal.Duration);
-        var totalDays = to.DayNumber - from.DayNumber + 1;
-        var currentStreak = analyzer.CalculateCurrentStreak(dailyDeepTotals, to, goal.Duration);
-        var yesterdayStreak = to > from ? analyzer.CalculateCurrentStreak(dailyDeepTotals, to.AddDays(-1), goal.Duration) : 0;
-        var longestStreak = analyzer.CalculateLongestStreak(dailyDeepTotals, from, to, goal.Duration);
+        var goalDays = analyzer.CountGoalDays(dailyDeepTotals, from, to, goal.Duration, skipDays);
+        var totalDays = analyzer.CountEligibleDays(from, to, skipDays);
+        var currentStreak = analyzer.CalculateCurrentStreak(dailyDeepTotals, to, goal.Duration, skipDays);
+        var yesterdayStreak = to > from ? analyzer.CalculateCurrentStreak(dailyDeepTotals, to.AddDays(-1), goal.Duration, skipDays) : 0;
+        var longestStreak = analyzer.CalculateLongestStreak(dailyDeepTotals, from, to, goal.Duration, skipDays);
         var color = goal.Color;
         var target = FormatGoalTarget(goal);
 
@@ -317,9 +371,23 @@ public static class Cli
             .AddColumn("Value");
 
         goalTable.AddRow("Daily target", $"[bold {color}]{TimeAnalyzer.FormatDuration(goal.Duration)}[/] deep work for {target}");
-        goalTable.AddRow(to == today ? "Today" : to.ToString("MMM dd", CultureInfo.InvariantCulture),
-            $"{ColorDuration(selectedDayTotal, color, bold: true)} [grey]({TimeAnalyzer.FormatPercent(Ratio(selectedDayTotal, goal.Duration))})[/]");
-        goalTable.AddRow("Remaining", remaining == TimeSpan.Zero ? "[green]met[/]" : $"[yellow]{TimeAnalyzer.FormatDuration(remaining)}[/]");
+
+        var todayLabel = to == today ? "Today" : to.ToString("MMM dd", CultureInfo.InvariantCulture);
+        if (todayIsSkipped)
+        {
+            goalTable.AddRow(todayLabel, $"{ColorDuration(selectedDayTotal, color, bold: true)} [grey](skip day — {to.DayOfWeek})[/]");
+        }
+        else
+        {
+            goalTable.AddRow(todayLabel,
+                $"{ColorDuration(selectedDayTotal, color, bold: true)} [grey]({TimeAnalyzer.FormatPercent(Ratio(selectedDayTotal, goal.Duration))})[/]");
+        }
+
+        if (todayIsSkipped)
+            goalTable.AddRow("Remaining", "[grey]skipped[/]");
+        else
+            goalTable.AddRow("Remaining", remaining == TimeSpan.Zero ? "[green]met[/]" : $"[yellow]{TimeAnalyzer.FormatDuration(remaining)}[/]");
+
         goalTable.AddRow($"Goal days ({from:MMM dd}–{to:MMM dd})", $"[bold]{goalDays}/{totalDays}[/]");
         goalTable.AddRow("Current streak", $"[bold]{currentStreak}[/] day(s)");
 
@@ -327,6 +395,9 @@ public static class Cli
             goalTable.AddRow("Streak through yesterday", $"[bold]{yesterdayStreak}[/] day(s)");
 
         goalTable.AddRow("Longest streak in range", $"[bold]{longestStreak}[/] day(s)");
+
+        if (skipDays.Count > 0)
+            goalTable.AddRow("Skip days", $"[grey]{Markup.Escape(DayOfWeekParser.FormatList(skipDays))}[/]");
 
         AnsiConsole.Write(new Panel(goalTable)
             .Header($"[bold {color}]{Markup.Escape(goal.DisplayName)} Daily Deep Work Goal[/]")
@@ -378,6 +449,9 @@ public static class Cli
 
         goalTable.AddRow("Longest weekly streak in range", $"[bold]{longestStreak}[/] week(s)");
         goalTable.AddRow("Week starts", "[bold]Monday[/]");
+
+        if (goal.SkipDays.Count > 0)
+            goalTable.AddRow("Skip days", $"[grey]{Markup.Escape(DayOfWeekParser.FormatList(goal.SkipDays))} (informational — weekly totals include skipped days)[/]");
 
         AnsiConsole.Write(new Panel(goalTable)
             .Header($"[bold {color}]{Markup.Escape(goal.DisplayName)} Weekly Deep Work Goal[/]")
@@ -541,6 +615,7 @@ public static class Cli
         AnsiConsole.MarkupLine("[bold]Usage[/]");
         AnsiConsole.MarkupLine("  [grey]deepwork[/] [yellow]dashboard[/] [grey][[options]][/]");
         AnsiConsole.MarkupLine("  [grey]deepwork[/] [yellow]blocks[/] [grey][[options]][/]");
+        AnsiConsole.MarkupLine("  [grey]deepwork[/] [yellow]goals[/]      (interactive menu)");
         AnsiConsole.MarkupLine("  [grey]deepwork[/] [yellow]aliases[/]");
         AnsiConsole.WriteLine();
         AnsiConsole.MarkupLine("[bold]Examples[/]");
@@ -550,6 +625,8 @@ public static class Cli
         AnsiConsole.MarkupLine("  [grey]deepwork --goal writing=2h --goal-week writing=10h[/]");
         AnsiConsole.MarkupLine("  [grey]deepwork --goal study=okta+leetcode 4h[/]");
         AnsiConsole.MarkupLine("  [grey]deepwork --goal-week study=okta+leetcode 25h[/]");
+        AnsiConsole.MarkupLine("  [grey]deepwork --goal job=3h --skip-days job=sat,sun[/]");
+        AnsiConsole.MarkupLine("  [grey]deepwork goals[/]        (interactive menu)");
         AnsiConsole.MarkupLine("  [grey]deepwork --clear-goals[/]");
         AnsiConsole.MarkupLine("  [grey]deepwork --leetcode-goal 1h --anki-goal 30m[/]");
         AnsiConsole.MarkupLine("  [grey]deepwork --non-deep-tags admin,meeting,break,email[/]");
@@ -570,6 +647,7 @@ public static class Cli
         AnsiConsole.MarkupLine("  [yellow]--goal-week <tag=duration>[/] Weekly deep-work goal for any tag; weeks start Monday.");
         AnsiConsole.MarkupLine("  [yellow]--goals-week <tag> <duration>[/] Weekly deep-work goal for any tag; weeks start Monday.");
         AnsiConsole.MarkupLine("  [yellow]--goal <label>=<a>+<b> <duration>[/] Composite goal summing time from multiple tags/categories.");
+        AnsiConsole.MarkupLine("  [yellow]--skip-days <label>=<days>[/] Exclude days of week from a daily goal's streak/goal-days. e.g. job=sat,sun. Use 'none' to clear.");
         AnsiConsole.MarkupLine("  [yellow]--<tag>-goal <duration>[/] Shorthand for a daily tag goal, e.g. --anki-goal 30m.");
         AnsiConsole.MarkupLine("  [yellow]--<tag>-goal-week <duration>[/] Shorthand for a weekly tag goal.");
         AnsiConsole.MarkupLine("  [yellow]--goals-file <path>[/]     JSON file for saved default goals.");
@@ -702,6 +780,13 @@ public static class Cli
                     options.MaxGap = DurationParser.Parse(RequireValue(), name);
                     break;
 
+                case "--skip-days":
+                case "--skip-day":
+                case "--exclude-days":
+                case "--exclude-day":
+                    ParseSkipDaysFlag(RequireValue(), name, options.SkipDaysByGoal);
+                    break;
+
                 case "--non-deep-tags":
                     options.NonDeepTags.Clear();
                     foreach (var tag in RequireValue().Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
@@ -740,6 +825,9 @@ public static class Cli
         "blocks" => "blocks",
         "alias" => "aliases",
         "aliases" => "aliases",
+        "goal" => "goals",
+        "goals" => "goals",
+        "menu" => "goals",
         "help" => "help",
         _ => command.Trim().ToLowerInvariant()
     };

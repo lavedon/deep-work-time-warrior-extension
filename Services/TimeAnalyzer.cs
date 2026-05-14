@@ -166,11 +166,19 @@ public sealed class TimeAnalyzer
         return longest;
     }
 
-    public int CountGoalDays(Dictionary<DateOnly, TimeSpan> dailyTotals, DateOnly fromInclusive, DateOnly toInclusive, TimeSpan goal)
+    public int CountGoalDays(
+        Dictionary<DateOnly, TimeSpan> dailyTotals,
+        DateOnly fromInclusive,
+        DateOnly toInclusive,
+        TimeSpan goal,
+        IReadOnlySet<DayOfWeek>? skipDays = null)
     {
         var count = 0;
         for (var date = fromInclusive; date <= toInclusive; date = date.AddDays(1))
         {
+            if (skipDays is not null && skipDays.Contains(date.DayOfWeek))
+                continue;
+
             if (GetTotalForDay(dailyTotals, date) >= goal)
                 count++;
         }
@@ -178,7 +186,31 @@ public sealed class TimeAnalyzer
         return count;
     }
 
-    public int CalculateCurrentStreak(Dictionary<DateOnly, TimeSpan> dailyTotals, DateOnly endDate, TimeSpan goal)
+    public int CountEligibleDays(
+        DateOnly fromInclusive,
+        DateOnly toInclusive,
+        IReadOnlySet<DayOfWeek>? skipDays = null)
+    {
+        if (fromInclusive > toInclusive)
+            return 0;
+
+        var count = 0;
+        for (var date = fromInclusive; date <= toInclusive; date = date.AddDays(1))
+        {
+            if (skipDays is not null && skipDays.Contains(date.DayOfWeek))
+                continue;
+
+            count++;
+        }
+
+        return count;
+    }
+
+    public int CalculateCurrentStreak(
+        Dictionary<DateOnly, TimeSpan> dailyTotals,
+        DateOnly endDate,
+        TimeSpan goal,
+        IReadOnlySet<DayOfWeek>? skipDays = null)
     {
         if (dailyTotals.Count == 0)
             return 0;
@@ -188,6 +220,9 @@ public sealed class TimeAnalyzer
 
         for (var date = endDate; date >= earliest; date = date.AddDays(-1))
         {
+            if (skipDays is not null && skipDays.Contains(date.DayOfWeek))
+                continue;
+
             if (GetTotalForDay(dailyTotals, date) < goal)
                 break;
 
@@ -197,13 +232,21 @@ public sealed class TimeAnalyzer
         return streak;
     }
 
-    public int CalculateLongestStreak(Dictionary<DateOnly, TimeSpan> dailyTotals, DateOnly fromInclusive, DateOnly toInclusive, TimeSpan goal)
+    public int CalculateLongestStreak(
+        Dictionary<DateOnly, TimeSpan> dailyTotals,
+        DateOnly fromInclusive,
+        DateOnly toInclusive,
+        TimeSpan goal,
+        IReadOnlySet<DayOfWeek>? skipDays = null)
     {
         var current = 0;
         var longest = 0;
 
         for (var date = fromInclusive; date <= toInclusive; date = date.AddDays(1))
         {
+            if (skipDays is not null && skipDays.Contains(date.DayOfWeek))
+                continue;
+
             if (GetTotalForDay(dailyTotals, date) >= goal)
             {
                 current++;

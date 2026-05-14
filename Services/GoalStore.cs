@@ -141,6 +141,8 @@ public sealed class GoalStore
 
         var duration = DurationParser.Parse(durationText, $"goals file goal #{index}");
 
+        var skipDays = ReadSkipDays(element, index);
+
         if (TryGetProperty(element, "components", out var componentsElement)
             && componentsElement.ValueKind == JsonValueKind.Array)
         {
@@ -156,7 +158,7 @@ public sealed class GoalStore
                 throw new InvalidOperationException($"Goal #{index} in the goals file has an empty 'components' array.");
 
             TryGetString(element, "label", out var label);
-            return DeepWorkGoal.Composite(label, components, duration, cadence);
+            return DeepWorkGoal.Composite(label, components, duration, cadence, skipDays);
         }
 
         if (TryGetString(element, "category", out var categoryText))
@@ -164,13 +166,40 @@ public sealed class GoalStore
             if (!TryParseCategory(categoryText, out var category))
                 throw new InvalidOperationException($"Goal #{index} in the goals file has unknown category '{categoryText}'.");
 
-            return DeepWorkGoal.ForCategory(category, duration, cadence);
+            return DeepWorkGoal.ForCategory(category, duration, cadence, skipDays);
         }
 
         if (TryGetString(element, "tag", out var tag))
-            return DeepWorkGoal.ForTag(tag, duration, cadence);
+            return DeepWorkGoal.ForTag(tag, duration, cadence, skipDays);
 
         throw new InvalidOperationException($"Goal #{index} in the goals file must specify 'tag', 'category', or 'components'.");
+    }
+
+    private static IReadOnlyList<DayOfWeek>? ReadSkipDays(JsonElement element, int index)
+    {
+        if (!TryGetProperty(element, "skipDays", out var skipDaysElement)
+            || skipDaysElement.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        var days = new List<DayOfWeek>();
+        foreach (var dayElement in skipDaysElement.EnumerateArray())
+        {
+            if (dayElement.ValueKind != JsonValueKind.String)
+                throw new InvalidOperationException($"Goal #{index} has a non-string entry in 'skipDays'.");
+
+            var text = dayElement.GetString();
+            if (string.IsNullOrWhiteSpace(text))
+                continue;
+
+            if (!DayOfWeekParser.TryParse(text, out var day))
+                throw new InvalidOperationException($"Goal #{index} has invalid skipDays entry '{text}'.");
+
+            days.Add(day);
+        }
+
+        return days;
     }
 
     private static GoalComponent ReadComponent(JsonElement element, int goalIndex, int componentIndex)
@@ -226,6 +255,19 @@ public sealed class GoalStore
         }
 
         writer.WriteString("duration", FormatDurationForConfig(goal.Duration));
+
+        if (goal.SkipDays.Count > 0)
+        {
+            writer.WritePropertyName("skipDays");
+            writer.WriteStartArray();
+            foreach (var day in DayOfWeekParser.WeekOrder)
+            {
+                if (goal.SkipDays.Contains(day))
+                    writer.WriteStringValue(day.ToString());
+            }
+            writer.WriteEndArray();
+        }
+
         writer.WriteEndObject();
     }
 

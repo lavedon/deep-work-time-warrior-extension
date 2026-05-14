@@ -17,6 +17,7 @@ public sealed class AppOptions
     public bool Help { get; set; }
     public bool ListAliases { get; set; }
     public HashSet<string> NonDeepTags { get; } = CategoryMapper.NormalizeSet(CategoryMapper.DefaultNonDeepTags);
+    public Dictionary<string, IReadOnlySet<DayOfWeek>> SkipDaysByGoal { get; } = new(StringComparer.OrdinalIgnoreCase);
 
     public IReadOnlyList<DeepWorkGoal> EffectiveGoals => Goals.Count == 0
         ? [DeepWorkGoal.ForCategory(WorkCategory.Job, TimeSpan.FromHours(3))]
